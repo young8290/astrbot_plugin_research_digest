@@ -23,7 +23,7 @@ from astrbot.core.star.filter.event_message_type import EventMessageType
 
 
 PLUGIN_NAME = "astrbot_plugin_research_digest"
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.4.0"
 ARXIV_ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 DEFAULT_DESKTOP_DIR = "~/Desktop/Research_Paper_Summaries"
 DEFAULT_COLLECTION = "research_paper_digest"
@@ -37,15 +37,16 @@ DEFAULT_USER_AGENT = (
 
 SUMMARY_PROMPT = """
 你是一个服务于 AstrBot 角色的“论文研究巡检插件”。
-你的任务是把来自 arXiv、Google Scholar、GitHub 的原始证据整理成严谨、紧凑、可信、全中文的研究简报。
+你的任务是把来自 arXiv、Google Scholar、GitHub 的原始证据整理成严谨、可信、全中文、便于深入理解技术核心的研究简报。
 
 工作步骤：
 1. 仔细阅读证据包，只能依据证据包中的信息做总结，不要编造论文内容。
-2. 提炼论文的核心研究问题、方法流程、创新点，以及它和当前关注主题的关系。
-3. 如果证据中没有明确给出数学公式，就明确写“未从证据中获取到公式”，不要幻觉补全。
-4. 尽量把术语、结构、表述都规范化，方便每天系统化浏览。
-5. 优先提取具体信息：benchmark、训练设置、输入输出模态、数据集、动作空间、硬件平台、仿真环境、策略结构、优化目标。
-6. 如果 GitHub 仓库相关，要说明它更像官方代码、复现项目、基准工具，还是只是弱相关项目。
+2. 不要只写“做了什么”，还要写清楚“核心难点是什么、为什么以前的方法不行、这篇论文到底靠什么机制解决、具体如何实现”。
+3. 对方法部分必须尽量落到可执行层：模块划分、输入输出、数据流、训练信号、优化目标、推理时序、关键约束、各组件如何配合。
+4. 如果证据中没有明确给出数学公式，就明确写“未从证据中获取到公式”，不要幻觉补全；但要尽量解释目标函数、约束或隐含优化逻辑。
+5. 尽量把术语、结构、表述都规范化，方便每天系统化浏览。
+6. 优先提取具体信息：benchmark、训练设置、输入输出模态、数据集、动作空间、硬件平台、仿真环境、策略结构、优化目标。
+7. 如果 GitHub 仓库相关，要说明它更像官方代码、复现项目、基准工具，还是只是弱相关项目。
 
 返回要求：
 1. 只能返回 JSON，不要加 markdown 代码块。
@@ -54,8 +55,24 @@ SUMMARY_PROMPT = """
 {
   "tldr": "一段中文总结",
   "problem_statement": "中文",
+  "research_gap": "中文，说明以前方法的短板与本文切入点",
+  "central_hypothesis": "中文，说明作者相信什么机制会奏效",
+  "system_overview": "中文，2-4 句讲清整体方案",
   "innovation_points": ["中文要点", "..."],
   "method_breakdown": ["中文要点", "..."],
+  "key_modules": [
+    {
+      "name": "模块名",
+      "role": "负责什么",
+      "input": "输入是什么",
+      "output": "输出是什么",
+      "details": "内部机制或与其他模块的配合方式"
+    }
+  ],
+  "implementation_pipeline": ["按时间或数据流顺序拆解实现过程", "..."],
+  "training_or_optimization": ["训练目标、损失、监督信号、优化过程", "..."],
+  "inference_workflow": ["推理阶段如何一步步运行", "..."],
+  "why_it_works": ["解释为什么这些设计能解决问题", "..."],
   "core_equations": [
     {
       "name": "公式或目标函数名称",
@@ -65,6 +82,8 @@ SUMMARY_PROMPT = """
   ],
   "experiments_and_results": ["中文要点", "..."],
   "limitations": ["中文要点", "..."],
+  "technical_takeaways": ["读完后最值得记住的技术抓手", "..."],
+  "evidence_quality": ["哪些内容证据充分，哪些只是根据摘要推断", "..."],
   "topic_relevance": "中文",
   "repo_assessment": ["中文要点", "..."],
   "follow_up_questions": ["中文要点", "..."],
@@ -109,11 +128,21 @@ class PaperSummary:
     source: str
     tldr: str
     problem_statement: str
+    research_gap: str
+    central_hypothesis: str
+    system_overview: str
     innovation_points: list[str]
     method_breakdown: list[str]
+    key_modules: list[dict[str, str]]
+    implementation_pipeline: list[str]
+    training_or_optimization: list[str]
+    inference_workflow: list[str]
+    why_it_works: list[str]
     core_equations: list[dict[str, str]]
     experiments_and_results: list[str]
     limitations: list[str]
+    technical_takeaways: list[str]
+    evidence_quality: list[str]
     topic_relevance: str
     repo_assessment: list[str]
     follow_up_questions: list[str]
@@ -810,11 +839,21 @@ class ResearchDigestPlugin(Star):
             source=candidate.source,
             tldr=self._safe_text(parsed.get("tldr")),
             problem_statement=self._safe_text(parsed.get("problem_statement")),
+            research_gap=self._safe_text(parsed.get("research_gap")),
+            central_hypothesis=self._safe_text(parsed.get("central_hypothesis")),
+            system_overview=self._safe_text(parsed.get("system_overview")),
             innovation_points=self._coerce_list(parsed.get("innovation_points")),
             method_breakdown=self._coerce_list(parsed.get("method_breakdown")),
+            key_modules=self._coerce_modules(parsed.get("key_modules")),
+            implementation_pipeline=self._coerce_list(parsed.get("implementation_pipeline")),
+            training_or_optimization=self._coerce_list(parsed.get("training_or_optimization")),
+            inference_workflow=self._coerce_list(parsed.get("inference_workflow")),
+            why_it_works=self._coerce_list(parsed.get("why_it_works")),
             core_equations=self._coerce_equations(parsed.get("core_equations")),
             experiments_and_results=self._coerce_list(parsed.get("experiments_and_results")),
             limitations=self._coerce_list(parsed.get("limitations")),
+            technical_takeaways=self._coerce_list(parsed.get("technical_takeaways")),
+            evidence_quality=self._coerce_list(parsed.get("evidence_quality")),
             topic_relevance=self._safe_text(
                 parsed.get("topic_relevance") or parsed.get("embodied_ai_relevance")
             ),
@@ -979,12 +1018,36 @@ class ResearchDigestPlugin(Star):
         return {
             "tldr": candidate.abstract or "当前没有拿到足够摘要信息，建议后续人工补读原文。",
             "problem_statement": candidate.abstract or "当前证据不足，需要人工进一步确认论文问题定义。",
+            "research_gap": "当前证据不足，只能确认论文试图解决某个已有方法尚未覆盖或表现不足的问题。",
+            "central_hypothesis": "作者大概率认为，引入新的结构设计、训练方式或任务分解能够改善现有问题，但现有证据不足以精确还原。",
+            "system_overview": "当前没有拿到足够证据去重建完整系统流程，建议结合摘要、论文 PDF 和代码仓库继续核对。",
             "innovation_points": [
                 "本次总结回退到了源站元数据，因为模型总结结果暂时不可用。",
                 "可以先结合摘要与仓库链接做人工补充。",
             ],
             "method_breakdown": [
                 "建议优先查看论文摘要和相关仓库，以补全训练流程和方法细节。",
+            ],
+            "key_modules": [
+                {
+                    "name": "待补充",
+                    "role": "当前证据不足，无法确认关键模块划分。",
+                    "input": "待补充",
+                    "output": "待补充",
+                    "details": "建议结合论文图示、算法框图和代码结构继续补全。",
+                }
+            ],
+            "implementation_pipeline": [
+                "当前只拿到元数据，无法可靠拆出完整实现流水线。",
+            ],
+            "training_or_optimization": [
+                "建议优先查看论文摘要和方法章节，以确认训练目标、损失函数和监督信号。",
+            ],
+            "inference_workflow": [
+                "建议结合方法图和实验设置，补充推理阶段的模块调用顺序。",
+            ],
+            "why_it_works": [
+                "当前证据不足，只能推测作者通过新的模块设计、任务分解或训练策略提升性能。",
             ],
             "core_equations": [
                 {
@@ -995,6 +1058,8 @@ class ResearchDigestPlugin(Star):
             ],
             "experiments_and_results": ["建议继续查阅摘要原文、论文页面或仓库说明，以确认具体实验设置和 benchmark。"],
             "limitations": ["当前为回退摘要，信息完整度有限。"],
+            "technical_takeaways": ["在缺少全文证据时，当前最稳妥的做法是把论文先归档，再人工补读关键章节。"],
+            "evidence_quality": ["目前主要证据来自摘要和站点元数据，不能视为对全文技术细节的完整复原。"],
             "topic_relevance": f"该论文命中了当前配置的“{self._topic_label()}”主题词，初步判断与该主题相关。",
             "repo_assessment": ["仓库关联性还需要人工进一步核验。"],
             "follow_up_questions": ["建议打开论文 PDF，补充公式、实验表格和关键实现细节。"],
@@ -1006,6 +1071,24 @@ class ResearchDigestPlugin(Star):
             f"- [{repo.name}]({repo.url}) | stars={repo.stars} | updated={repo.updated_at}\n  - {repo.description}"
             for repo in summary.github_repos
         ]
+        module_lines = []
+        for module in summary.key_modules:
+            name = module.get("name", "模块")
+            role = module.get("role", "")
+            input_text = module.get("input", "")
+            output_text = module.get("output", "")
+            details = module.get("details", "")
+            module_lines.append(f"- {name}")
+            if role:
+                module_lines.append(f"  - 作用：{role}")
+            if input_text:
+                module_lines.append(f"  - 输入：{input_text}")
+            if output_text:
+                module_lines.append(f"  - 输出：{output_text}")
+            if details:
+                module_lines.append(f"  - 机制：{details}")
+        if not module_lines:
+            module_lines = ["- 当前证据不足，无法可靠拆出关键模块。"]
         equation_lines = []
         for eq in summary.core_equations:
             equation_lines.append(f"- {eq.get('name', '公式')}: `{eq.get('formula', '') or '未提供'}`")
@@ -1038,11 +1121,35 @@ class ResearchDigestPlugin(Star):
                 "## 研究问题",
                 summary.problem_statement or "无",
                 "",
+                "## 研究缺口",
+                summary.research_gap or "无",
+                "",
+                "## 核心假设",
+                summary.central_hypothesis or "无",
+                "",
+                "## 整体方案总览",
+                summary.system_overview or "无",
+                "",
                 "## 创新点",
                 bullet_list(summary.innovation_points, "无"),
                 "",
                 "## 方法拆解",
                 bullet_list(summary.method_breakdown, "无"),
+                "",
+                "## 关键模块拆解",
+                "\n".join(module_lines),
+                "",
+                "## 实现流水线",
+                bullet_list(summary.implementation_pipeline, "无"),
+                "",
+                "## 训练与优化",
+                bullet_list(summary.training_or_optimization, "无"),
+                "",
+                "## 推理流程",
+                bullet_list(summary.inference_workflow, "无"),
+                "",
+                "## 为什么它有效",
+                bullet_list(summary.why_it_works, "无"),
                 "",
                 "## 核心公式",
                 "\n".join(equation_lines),
@@ -1052,6 +1159,12 @@ class ResearchDigestPlugin(Star):
                 "",
                 "## 局限性",
                 bullet_list(summary.limitations, "无"),
+                "",
+                "## 技术启发",
+                bullet_list(summary.technical_takeaways, "无"),
+                "",
+                "## 证据质量与推断边界",
+                bullet_list(summary.evidence_quality, "无"),
                 "",
                 f"## 与“{self._topic_label()}”的关系",
                 summary.topic_relevance or "无",
@@ -1088,6 +1201,7 @@ class ResearchDigestPlugin(Star):
                     f"- 阅读优先级：{summary.reading_priority}",
                     f"- 论文链接：{summary.paper_url or '无'}",
                     f"- 摘要速览：{summary.tldr}",
+                    f"- 核心机制：{summary.system_overview or '无'}",
                     f"- 主题相关性：{summary.topic_relevance}",
                     "",
                 ]
@@ -1175,6 +1289,33 @@ class ResearchDigestPlugin(Star):
     def _topic_label(self) -> str:
         label = str(self._cfg("research.topic_label", "")).strip()
         return label or "研究主题"
+
+    def _coerce_modules(self, value: Any) -> list[dict[str, str]]:
+        modules: list[dict[str, str]] = []
+        if not isinstance(value, list):
+            return modules
+        for item in value:
+            if isinstance(item, dict):
+                modules.append(
+                    {
+                        "name": self._safe_text(item.get("name")),
+                        "role": self._safe_text(item.get("role")),
+                        "input": self._safe_text(item.get("input")),
+                        "output": self._safe_text(item.get("output")),
+                        "details": self._safe_text(item.get("details")),
+                    }
+                )
+            elif isinstance(item, str) and item.strip():
+                modules.append(
+                    {
+                        "name": item.strip(),
+                        "role": "",
+                        "input": "",
+                        "output": "",
+                        "details": "",
+                    }
+                )
+        return modules
 
     def _notification_platform_id(self) -> str:
         configured = str(self._cfg("notifications.platform_id", "")).strip()

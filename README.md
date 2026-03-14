@@ -20,6 +20,7 @@
 - 每天生成一个 `_index.md` 和可选的 `manifest.json`
 - 可把摘要镜像到知识库目录，并写入 AstrBot knowledge base collection
 - 自带 `/digest doctor` 自检指令，便于排查为什么没触发或没写入
+- 单篇论文会额外拆出研究缺口、核心假设、系统总览、关键模块、实现流水线、训练/优化、推理流程、为什么有效等技术核心部分
 
 ## 命令
 

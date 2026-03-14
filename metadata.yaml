@@ -1,0 +1,6 @@
+name: astrbot_plugin_research_digest
+display_name: Research Digest
+author: Codex
+version: v0.2.0
+desc: 在用户空闲时自动巡检论文与相关仓库，生成中文研究摘要，并同步到 AstrBot 知识库。
+repo: https://github.com/young8290/astrbot_plugin_research_digest

@@ -1,0 +1,244 @@
+{
+  "runtime": {
+    "description": "运行控制",
+    "hint": "控制空闲检测与每日自动扫描。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用自动巡检",
+        "hint": "关闭后不会因空闲而自动扫描，但仍可手动执行 `/digest run`。",
+        "type": "bool",
+        "default": true
+      },
+      "watched_user_ids": {
+        "description": "监控的 QQ 号",
+        "hint": "填写 QQ 号列表。留空时默认监控 AstrBot 的 `admins_id`。",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "inactivity_hours": {
+        "description": "空闲触发小时数",
+        "hint": "只有当监控对象持续这么久没有主动发消息时，才会开始当天扫描。",
+        "type": "int",
+        "default": 12
+      },
+      "poll_interval_minutes": {
+        "description": "轮询间隔（分钟）",
+        "hint": "插件多久检查一次是否满足“空闲触发”条件。",
+        "type": "int",
+        "default": 30
+      },
+      "run_only_once_per_day": {
+        "description": "每天只自动执行一次",
+        "hint": "开启后，同一天内最多自动跑一次；手动执行不受这个限制。",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "research": {
+    "description": "研究范围",
+    "hint": "控制搜索来源、查询词和每日论文数量。",
+    "type": "object",
+    "items": {
+      "topic_label": {
+        "description": "主题名称",
+        "hint": "用于日报标题、Prompt 和摘要展示，例如“人工智能研究”“扩散模型”“多模态大模型”。",
+        "type": "string",
+        "default": "人工智能研究"
+      },
+      "focus_queries": {
+        "description": "主题关键词",
+        "hint": "会用于 arXiv、Google Scholar、GitHub 的检索词列表。",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "artificial intelligence",
+          "machine learning",
+          "multimodal model",
+          "agent"
+        ]
+      },
+      "enable_arxiv": {
+        "description": "启用 arXiv",
+        "hint": "开启后从 arXiv 抓最近论文。",
+        "type": "bool",
+        "default": true
+      },
+      "enable_google_scholar": {
+        "description": "启用 Google Scholar",
+        "hint": "开启后尝试从 Google Scholar 补充题目、摘要片段与引用信息。该来源可能因反爬限制返回为空。",
+        "type": "bool",
+        "default": true
+      },
+      "enable_github": {
+        "description": "启用 GitHub",
+        "hint": "开启后检索相关仓库，并在论文摘要中附带代码线索。",
+        "type": "bool",
+        "default": true
+      },
+      "recent_days": {
+        "description": "最近天数窗口",
+        "hint": "超出这个时间窗口的 arXiv 论文会被过滤。",
+        "type": "int",
+        "default": 7
+      },
+      "max_papers_per_run": {
+        "description": "每日总结论文数量",
+        "hint": "每天最多生成多少篇完整论文 Markdown 摘要。",
+        "type": "int",
+        "default": 4
+      },
+      "arxiv_results_per_query": {
+        "description": "每个关键词抓取的 arXiv 数量",
+        "type": "int",
+        "default": 6
+      },
+      "scholar_results_per_query": {
+        "description": "每个关键词抓取的 Scholar 数量",
+        "type": "int",
+        "default": 4
+      },
+      "github_results_per_query": {
+        "description": "每日 GitHub 雷达数量",
+        "hint": "用于首页 GitHub 雷达的仓库条目数。",
+        "type": "int",
+        "default": 5
+      },
+      "github_repos_per_paper": {
+        "description": "每篇论文附带的 GitHub 仓库数",
+        "type": "int",
+        "default": 3
+      }
+    }
+  },
+  "outputs": {
+    "description": "输出设置",
+    "hint": "控制桌面摘要、知识库镜像和索引产物。",
+    "type": "object",
+    "items": {
+      "desktop_output_dir": {
+        "description": "桌面摘要根目录",
+        "hint": "每天会在该目录下新建一个 `YYYY-MM-DD` 子目录。",
+        "type": "string",
+        "default": "~/Desktop/Research_Paper_Summaries"
+      },
+      "collection_name": {
+        "description": "知识库集合名",
+        "hint": "写入 AstrBot 知识库时使用的 collection 名称。",
+        "type": "string",
+        "default": "research_paper_digest"
+      },
+      "knowledge_base_import_subdir": {
+        "description": "知识库镜像子目录",
+        "hint": "会把 Markdown 镜像一份到知识库插件数据目录下的这个子目录。",
+        "type": "string",
+        "default": "imports/research_paper_digest"
+      },
+      "write_kb_import_markdown": {
+        "description": "写入知识库镜像 Markdown",
+        "hint": "关闭后不再生成知识库导入目录里的镜像文件。",
+        "type": "bool",
+        "default": true
+      },
+      "sync_to_knowledge_base": {
+        "description": "同步写入 AstrBot 知识库",
+        "hint": "关闭后只保留桌面 Markdown，不往知识库 collection 写入向量数据。",
+        "type": "bool",
+        "default": true
+      },
+      "write_manifest_json": {
+        "description": "生成 manifest.json",
+        "hint": "开启后会额外输出一份当天任务的结构化清单。",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "network": {
+    "description": "网络请求",
+    "hint": "控制外部站点抓取时的超时与 Scholar 访问节奏。",
+    "type": "object",
+    "items": {
+      "request_timeout_seconds": {
+        "description": "请求总超时（秒）",
+        "type": "float",
+        "default": 20.0
+      },
+      "connect_timeout_seconds": {
+        "description": "连接超时（秒）",
+        "type": "float",
+        "default": 15.0
+      },
+      "scholar_request_interval_seconds": {
+        "description": "Scholar 请求间隔（秒）",
+        "hint": "适当放慢访问节奏，有助于减少 Google Scholar 拒绝请求的概率。",
+        "type": "float",
+        "default": 1.0
+      }
+    }
+  },
+  "providers": {
+    "description": "模型与接口",
+    "hint": "控制使用哪个模型来做论文归纳，以及 GitHub API 配额。",
+    "type": "object",
+    "items": {
+      "summary_provider_id": {
+        "description": "摘要模型 Provider",
+        "hint": "留空则使用 AstrBot 当前默认聊天模型。",
+        "type": "string",
+        "_special": "select_provider",
+        "default": ""
+      },
+      "summary_model": {
+        "description": "摘要模型名覆盖",
+        "hint": "可选。用于强制指定某个模型名；留空则沿用 Provider 默认模型。",
+        "type": "string",
+        "default": ""
+      },
+      "github_token": {
+        "description": "GitHub Token",
+        "hint": "可选。配置后 GitHub API 的速率限制会更宽松。",
+        "type": "string",
+        "obvious_hint": true,
+        "default": ""
+      }
+    }
+  },
+  "prompts": {
+    "description": "Prompt 配置",
+    "hint": "可在这里改整个总结提示词，或者只补充额外要求。",
+    "type": "object",
+    "items": {
+      "summary_prompt_override": {
+        "description": "完整总结 Prompt 覆盖",
+        "hint": "留空时使用插件内置 Prompt；填写后会完全替换内置 Prompt。",
+        "type": "text",
+        "default": ""
+      },
+      "summary_prompt_prefix": {
+        "description": "总结 Prompt 前置要求",
+        "hint": "会拼接到内置 Prompt 前面，适合写全局身份、语气或长期偏好。",
+        "type": "text",
+        "default": ""
+      },
+      "daily_focus_note": {
+        "description": "每日关注重点",
+        "hint": "例如“优先关注可复现工作、带实验表格的论文、开源代码完整度”。会追加到 Prompt 中。",
+        "type": "text",
+        "default": ""
+      },
+      "summary_prompt_suffix": {
+        "description": "总结 Prompt 补充要求",
+        "hint": "会追加到 Prompt 末尾，适合临时加格式要求或观察重点。",
+        "type": "text",
+        "default": ""
+      }
+    }
+  }
+}

@@ -18,11 +18,12 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.config.astrbot_config import AstrBotConfig
+from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.star.filter.event_message_type import EventMessageType
 
 
 PLUGIN_NAME = "astrbot_plugin_research_digest"
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.3.0"
 ARXIV_ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 DEFAULT_DESKTOP_DIR = "~/Desktop/Research_Paper_Summaries"
 DEFAULT_COLLECTION = "research_paper_digest"
@@ -128,7 +129,7 @@ class PaperSummary:
     "Codex",
     "Generic research paper scout with daily markdown briefs and knowledge-base sync",
     PLUGIN_VERSION,
-    "https://github.com/your-username/astrbot_plugin_research_digest",
+    "https://github.com/young8290/astrbot_plugin_research_digest",
 )
 class ResearchDigestPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -139,10 +140,17 @@ class ResearchDigestPlugin(Star):
         self.state_file = self.data_dir / "state.json"
         self.run_lock = asyncio.Lock()
         self.monitor_task: asyncio.Task | None = None
+        self.startup_task: asyncio.Task | None = None
+        self.worker_task: asyncio.Task | None = None
         self.http: httpx.AsyncClient | None = None
+        self.run_queue: asyncio.Queue[str] = asyncio.Queue()
+        self.pending_reasons: set[str] = set()
+        self.active_reason: str | None = None
+        self.started_at = time.time()
         self.state: dict[str, Any] = {
             "last_user_activity": 0.0,
             "last_run_date": "",
+            "last_run_at": "",
             "last_run_reason": "",
             "last_run_status": "never",
             "last_error": "",
@@ -150,6 +158,10 @@ class ResearchDigestPlugin(Star):
             "last_candidate_count": 0,
             "last_paper_count": 0,
             "last_repo_radar_count": 0,
+            "last_notification_status": "",
+            "last_scheduler_tick": "",
+            "last_enqueued_reason": "",
+            "run_history": [],
         }
         self.admin_ids = [str(x) for x in self.context.get_config().get("admins_id", [])]
 
@@ -161,16 +173,39 @@ class ResearchDigestPlugin(Star):
             self._save_state()
         self.http = httpx.AsyncClient(
             timeout=httpx.Timeout(
-                float(self.config.get("network.request_timeout_seconds", 20.0)),
-                connect=float(self.config.get("network.connect_timeout_seconds", 15.0)),
+                float(self._cfg("network.request_timeout_seconds", 20.0)),
+                connect=float(self._cfg("network.connect_timeout_seconds", 15.0)),
             ),
             follow_redirects=True,
             headers={"User-Agent": DEFAULT_USER_AGENT},
         )
+        self.worker_task = asyncio.create_task(self._worker_loop())
+        if self._cfg("runtime.enable_startup_run", True):
+            self.startup_task = asyncio.create_task(self._startup_auto_run())
         self.monitor_task = asyncio.create_task(self._monitor_loop())
-        logger.info("[%s] plugin initialized", PLUGIN_NAME)
+        logger.info(
+            "[%s] plugin initialized | watched=%s | idle=%sh | poll=%sm | startup=%s | fixed_time=%s",
+            PLUGIN_NAME,
+            ",".join(self._get_watched_user_ids()) or "(none)",
+            self._cfg("runtime.inactivity_hours", 12),
+            self._cfg("runtime.poll_interval_minutes", 30),
+            self._cfg("runtime.enable_startup_run", True),
+            self._cfg("runtime.fixed_daily_time", "") or "(none)",
+        )
 
     async def terminate(self) -> None:
+        if self.worker_task:
+            self.worker_task.cancel()
+            try:
+                await self.worker_task
+            except asyncio.CancelledError:
+                pass
+        if self.startup_task:
+            self.startup_task.cancel()
+            try:
+                await self.startup_task
+            except asyncio.CancelledError:
+                pass
         if self.monitor_task:
             self.monitor_task.cancel()
             try:
@@ -212,25 +247,28 @@ class ResearchDigestPlugin(Star):
         enabled_sources = [
             name
             for name, flag in [
-                ("arXiv", self.config.get("research.enable_arxiv", True)),
-                ("Google Scholar", self.config.get("research.enable_google_scholar", True)),
-                ("GitHub", self.config.get("research.enable_github", True)),
+                ("arXiv", self._cfg("research.enable_arxiv", True)),
+                ("Google Scholar", self._cfg("research.enable_google_scholar", True)),
+                ("GitHub", self._cfg("research.enable_github", True)),
             ]
             if flag
         ]
         lines = [
-            f"自动巡检：{self.config.get('runtime.enabled', True)}",
-            f"知识库集合：{self.config.get('outputs.collection_name', DEFAULT_COLLECTION)}",
+            f"自动巡检：{self._cfg('runtime.enabled', True)}",
+            f"知识库集合：{self._cfg('outputs.collection_name', DEFAULT_COLLECTION)}",
             f"当前主题：{self._topic_label()}",
             f"监控 QQ：{watched}",
             f"启用来源：{', '.join(enabled_sources) or '(未启用)'}",
-            f"每日论文数量：{self.config.get('research.max_papers_per_run', 4)}",
+            f"每日论文数量：{self._cfg('research.max_papers_per_run', 4)}",
+            f"启动后自动首跑：{self._cfg('runtime.enable_startup_run', True)}",
+            f"固定执行时间：{self._cfg('runtime.fixed_daily_time', '') or '(未设置)'}",
             f"上次执行日期：{self.state.get('last_run_date', '') or '(从未执行)'}",
             f"上次执行原因：{self._format_reason(self.state.get('last_run_reason', '')) or '(无)'}",
             f"上次执行状态：{self.state.get('last_run_status', 'unknown')}",
             f"上次候选数：{self.state.get('last_candidate_count', 0)}",
             f"上次生成论文数：{self.state.get('last_paper_count', 0)}",
             f"上次 GitHub 雷达数：{self.state.get('last_repo_radar_count', 0)}",
+            f"上次通知状态：{self.state.get('last_notification_status', '') or '(无)'}",
             f"上次错误：{self.state.get('last_error', '') or '(无)'}",
             f"当前空闲小时：{inactivity}",
         ]
@@ -240,26 +278,162 @@ class ResearchDigestPlugin(Star):
     async def digest_prompt(self, event: AstrMessageEvent):
         yield event.plain_result(self._active_summary_prompt())
 
+    @digest_group.command("doctor")
+    async def digest_doctor(self, event: AstrMessageEvent):
+        watched = ", ".join(self._get_watched_user_ids()) or "(未设置)"
+        notify_targets = ", ".join(self._notify_targets()) or "(未设置)"
+        kb_meta = self.context.get_registered_star("astrbot_plugin_knowledge_base")
+        provider = self._get_summary_provider()
+        provider_label = "(默认/未找到)"
+        if provider:
+            try:
+                provider_meta = provider.meta()
+                provider_label = getattr(provider_meta, "id", None) or str(provider_meta)
+            except Exception:
+                provider_label = str(provider)
+        lines = [
+            f"插件版本：{PLUGIN_VERSION}",
+            f"主题：{self._topic_label()}",
+            f"监控 QQ：{watched}",
+            f"通知目标：{notify_targets}",
+            f"自动巡检：{self._cfg('runtime.enabled', True)}",
+            f"启动首跑：{self._cfg('runtime.enable_startup_run', True)}",
+            f"启动延迟（分钟）：{self._cfg('runtime.startup_run_delay_minutes', 3)}",
+            f"固定执行时间：{self._cfg('runtime.fixed_daily_time', '') or '(未设置)'}",
+            f"空闲触发小时：{self._cfg('runtime.inactivity_hours', 12)}",
+            f"轮询间隔（分钟）：{self._cfg('runtime.poll_interval_minutes', 30)}",
+            f"失败补跑（分钟）：{self._cfg('runtime.retry_on_failure_minutes', 90)}",
+            f"空结果补跑（分钟）：{self._cfg('runtime.retry_on_empty_minutes', 180)}",
+            f"输出目录：{self._resolve_output_dir()}",
+            f"知识库镜像目录：{self._kb_import_dir()}",
+            f"知识库同步：{self._cfg('outputs.sync_to_knowledge_base', True)}",
+            f"知识库插件可用：{bool(kb_meta and kb_meta.star_cls)}",
+            f"摘要 Provider：{provider_label}",
+            f"上次调度心跳：{self.state.get('last_scheduler_tick', '') or '(无)'}",
+            f"上次入队原因：{self._format_reason(self.state.get('last_enqueued_reason', '')) or '(无)'}",
+            f"上次执行时间：{self.state.get('last_run_at', '') or '(从未执行)'}",
+            f"上次执行状态：{self.state.get('last_run_status', 'unknown')}",
+            f"上次错误：{self.state.get('last_error', '') or '(无)'}",
+        ]
+        yield event.plain_result("\n".join(lines))
+
     async def _monitor_loop(self) -> None:
         while True:
             try:
-                await asyncio.sleep(max(60, int(self.config.get("runtime.poll_interval_minutes", 30)) * 60))
-                if self._should_run_scheduled():
-                    await self._run_pipeline("scheduled")
+                await asyncio.sleep(max(60, int(self._cfg("runtime.poll_interval_minutes", 30)) * 60))
+                self.state["last_scheduler_tick"] = datetime.now().isoformat(timespec="seconds")
+                self._save_state()
+                auto_reason = self._get_auto_run_reason()
+                if auto_reason:
+                    logger.info("[%s] auto run triggered by %s", PLUGIN_NAME, auto_reason)
+                    await self._enqueue_run(auto_reason)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.error("[%s] monitor loop failed: %s", PLUGIN_NAME, exc, exc_info=True)
 
-    def _should_run_scheduled(self) -> bool:
-        if not self.config.get("runtime.enabled", True):
+    async def _startup_auto_run(self) -> None:
+        try:
+            delay_seconds = max(0, int(self._cfg("runtime.startup_run_delay_minutes", 3)) * 60)
+            logger.info("[%s] startup auto run armed, delay=%ss", PLUGIN_NAME, delay_seconds)
+            await asyncio.sleep(delay_seconds)
+            if self._cfg("runtime.run_only_once_per_day", True) and self.state.get("last_run_date") == self._today_str():
+                logger.info("[%s] startup auto run skipped because today's run already exists", PLUGIN_NAME)
+                return
+            logger.info("[%s] startup auto run executing", PLUGIN_NAME)
+            await self._enqueue_run("startup")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("[%s] startup auto run failed: %s", PLUGIN_NAME, exc, exc_info=True)
+
+    async def _worker_loop(self) -> None:
+        while True:
+            reason = await self.run_queue.get()
+            self.active_reason = reason
+            try:
+                logger.info("[%s] worker started for reason=%s", PLUGIN_NAME, reason)
+                await self._run_pipeline(reason)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("[%s] worker failed for reason=%s: %s", PLUGIN_NAME, reason, exc, exc_info=True)
+            finally:
+                self.pending_reasons.discard(reason)
+                self.active_reason = None
+                self.run_queue.task_done()
+
+    async def _enqueue_run(self, reason: str, *, force: bool = False) -> bool:
+        reason = str(reason).strip()
+        if not reason:
             return False
+        if self.active_reason == reason or reason in self.pending_reasons:
+            logger.info("[%s] skip enqueue duplicated reason=%s", PLUGIN_NAME, reason)
+            return False
+        if (
+            not force
+            and reason != "manual"
+            and self._cfg("runtime.run_only_once_per_day", True)
+            and self.state.get("last_run_date") == self._today_str()
+            and self.state.get("last_run_status") == "success"
+        ):
+            logger.info("[%s] skip enqueue %s because today's successful run already exists", PLUGIN_NAME, reason)
+            return False
+        self.pending_reasons.add(reason)
+        self.state["last_enqueued_reason"] = reason
+        self._save_state()
+        await self.run_queue.put(reason)
+        logger.info("[%s] enqueued run reason=%s pending=%s", PLUGIN_NAME, reason, sorted(self.pending_reasons))
+        return True
+
+    def _get_auto_run_reason(self) -> str | None:
+        if not self._cfg("runtime.enabled", True):
+            return None
         today = self._today_str()
-        if self.config.get("runtime.run_only_once_per_day", True) and self.state.get("last_run_date") == today:
-            return False
+        retry_reason = self._get_retry_reason(today)
+        if retry_reason:
+            return retry_reason
+        if self._cfg("runtime.run_only_once_per_day", True) and self.state.get("last_run_date") == today:
+            return None
+
+        if self._cfg("runtime.enable_startup_run", True):
+            startup_delay_seconds = int(self._cfg("runtime.startup_run_delay_minutes", 3)) * 60
+            if time.time() - self.started_at >= startup_delay_seconds:
+                if not self.state.get("last_run_date"):
+                    return "startup"
+
+        fixed_daily_time = str(self._cfg("runtime.fixed_daily_time", "")).strip()
+        if fixed_daily_time:
+            schedule_dt = self._scheduled_datetime_today(fixed_daily_time)
+            last_run_at = self._state_datetime("last_run_at")
+            if schedule_dt and datetime.now() >= schedule_dt and (
+                not last_run_at or last_run_at.date() != datetime.now().date() or last_run_at < schedule_dt
+            ):
+                return "daily_time"
+
         idle_seconds = time.time() - float(self.state.get("last_user_activity", 0.0))
-        required_idle = int(self.config.get("runtime.inactivity_hours", 12)) * 3600
-        return idle_seconds >= required_idle
+        required_idle = int(self._cfg("runtime.inactivity_hours", 12)) * 3600
+        if idle_seconds >= required_idle:
+            return "idle"
+        return None
+
+    def _get_retry_reason(self, today: str) -> str | None:
+        if self.state.get("last_run_date") != today:
+            return None
+        last_run_at = self._state_datetime("last_run_at")
+        if not last_run_at:
+            return None
+        minutes_since = (datetime.now() - last_run_at).total_seconds() / 60
+        status = str(self.state.get("last_run_status", "")).strip()
+        if status == "failed":
+            retry_after = int(self._cfg("runtime.retry_on_failure_minutes", 90))
+            if retry_after > 0 and minutes_since >= retry_after:
+                return "retry_failure"
+        if status == "empty":
+            retry_after = int(self._cfg("runtime.retry_on_empty_minutes", 180))
+            if retry_after > 0 and minutes_since >= retry_after:
+                return "retry_empty"
+        return None
 
     async def _run_pipeline(self, reason: str) -> tuple[bool, str]:
         if self.run_lock.locked():
@@ -267,42 +441,80 @@ class ResearchDigestPlugin(Star):
 
         async with self.run_lock:
             try:
+                logger.info("[%s] pipeline started | reason=%s", PLUGIN_NAME, reason)
                 outputs_dir = self._resolve_output_dir()
                 day_dir = outputs_dir / self._today_str()
-                kb_import_root = self._kb_import_dir() if self.config.get("outputs.write_kb_import_markdown", True) else None
+                kb_import_root = self._kb_import_dir() if self._cfg("outputs.write_kb_import_markdown", True) else None
                 kb_import_dir = kb_import_root / self._today_str() if kb_import_root else None
                 day_dir.mkdir(parents=True, exist_ok=True)
                 if kb_import_dir:
                     kb_import_dir.mkdir(parents=True, exist_ok=True)
 
                 candidates = await self._collect_candidates()
-                if not candidates:
-                    self._record_run("failed", reason, "没有找到符合条件的研究候选。", [])
-                    return False, "没有找到符合条件的研究候选。"
-
-                selected = candidates[: max(1, int(self.config.get("research.max_papers_per_run", 4)))]
                 repo_radar: list[RepoCandidate] = []
-                if self.config.get("research.enable_github", True):
+                if self._cfg("research.enable_github", True):
                     repo_radar = await self._fetch_github_repos(
                         " OR ".join(self._focus_queries()),
-                        int(self.config.get("research.github_results_per_query", 5)),
+                        int(self._cfg("research.github_results_per_query", 5)),
                     )
+                self.state["last_candidate_count"] = len(candidates)
+                self.state["last_repo_radar_count"] = len(repo_radar)
+                logger.info(
+                    "[%s] pipeline collected candidates=%s repo_radar=%s",
+                    PLUGIN_NAME,
+                    len(candidates),
+                    len(repo_radar),
+                )
+                if not candidates:
+                    index_md = self._render_daily_index([], repo_radar, reason)
+                    index_path = day_dir / "_index.md"
+                    index_path.write_text(index_md, encoding="utf-8")
+                    generated_files = [str(index_path)]
+                    if kb_import_dir:
+                        kb_index_path = kb_import_dir / "_index.md"
+                        kb_index_path.write_text(index_md, encoding="utf-8")
+                        generated_files.append(str(kb_index_path))
+                    if self._cfg("outputs.write_manifest_json", True):
+                        manifest_path = day_dir / "manifest.json"
+                        manifest_path.write_text(
+                            json.dumps(
+                                self._build_manifest(reason, [], [], repo_radar, generated_files),
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                            encoding="utf-8",
+                        )
+                        generated_files.append(str(manifest_path))
+                    kb_message = "未写入知识库。"
+                    if self._cfg("outputs.sync_to_knowledge_base", True):
+                        kb_message = await self._sync_to_knowledge_base([], index_md, day_dir)
+                    await self._notify_result(
+                        title=f"{self._topic_label()} 论文巡检",
+                        body=self._build_notification_text(reason, [], repo_radar, generated_files, kb_message),
+                        notify_key="empty",
+                    )
+                    self.state["last_paper_count"] = 0
+                    self._record_run("empty", reason, "没有找到符合条件的研究候选。", generated_files)
+                    logger.info("[%s] pipeline finished empty", PLUGIN_NAME)
+                    return True, "本次没有找到符合条件的研究候选，已生成空日报。"
+
+                selected = candidates[: max(1, int(self._cfg("research.max_papers_per_run", 4)))]
 
                 summaries: list[PaperSummary] = []
                 generated_files: list[str] = []
                 for index, paper in enumerate(selected, start=1):
                     scholar_match = None
-                    if self.config.get("research.enable_google_scholar", True):
+                    if self._cfg("research.enable_google_scholar", True):
                         scholar_match = await self._fetch_scholar_for_title(paper.title)
                     if scholar_match:
                         if scholar_match.scholar_snippet:
                             paper.scholar_snippet = scholar_match.scholar_snippet
                         if scholar_match.scholar_meta:
                             paper.scholar_meta = scholar_match.scholar_meta
-                    if self.config.get("research.enable_github", True):
+                    if self._cfg("research.enable_github", True):
                         paper.github_repos = await self._fetch_github_repos(
                             self._github_query_for_paper(paper.title),
-                            int(self.config.get("research.github_repos_per_paper", 3)),
+                            int(self._cfg("research.github_repos_per_paper", 3)),
                         )
                     else:
                         paper.github_repos = []
@@ -325,7 +537,7 @@ class ResearchDigestPlugin(Star):
                     kb_index_path = kb_import_dir / "_index.md"
                     kb_index_path.write_text(index_md, encoding="utf-8")
                     generated_files.append(str(kb_index_path))
-                if self.config.get("outputs.write_manifest_json", True):
+                if self._cfg("outputs.write_manifest_json", True):
                     manifest_path = day_dir / "manifest.json"
                     manifest_path.write_text(
                         json.dumps(
@@ -337,35 +549,53 @@ class ResearchDigestPlugin(Star):
                     )
                     generated_files.append(str(manifest_path))
 
-                if self.config.get("outputs.sync_to_knowledge_base", True):
+                if self._cfg("outputs.sync_to_knowledge_base", True):
                     kb_message = await self._sync_to_knowledge_base(summaries, index_md, day_dir)
                 else:
                     kb_message = "已关闭知识库写入，只生成了 Markdown 摘要。"
-                self.state["last_candidate_count"] = len(candidates)
                 self.state["last_paper_count"] = len(summaries)
-                self.state["last_repo_radar_count"] = len(repo_radar)
+                await self._notify_result(
+                    title=f"{self._topic_label()} 论文巡检已完成",
+                    body=self._build_notification_text(reason, summaries, repo_radar, generated_files, kb_message),
+                    notify_key="success",
+                )
                 self._record_run("success", reason, kb_message, generated_files)
+                logger.info("[%s] pipeline finished successfully papers=%s", PLUGIN_NAME, len(summaries))
                 return True, f"论文巡检完成。{kb_message}"
             except Exception as exc:
                 logger.error("[%s] pipeline failed: %s", PLUGIN_NAME, exc, exc_info=True)
                 self.state["last_candidate_count"] = 0
                 self.state["last_paper_count"] = 0
                 self.state["last_repo_radar_count"] = 0
+                await self._notify_result(
+                    title=f"{self._topic_label()} 论文巡检失败",
+                    body=f"执行原因：{self._format_reason(reason)}\n错误：{exc}",
+                    notify_key="failure",
+                )
                 self._record_run("failed", reason, f"{exc}", [])
                 return False, f"{exc}"
 
     async def _collect_candidates(self) -> list[PaperCandidate]:
         arxiv_candidates: list[PaperCandidate] = []
         scholar_candidates: list[PaperCandidate] = []
-        per_query_arxiv = int(self.config.get("research.arxiv_results_per_query", 6))
-        per_query_scholar = int(self.config.get("research.scholar_results_per_query", 4))
+        per_query_arxiv = int(self._cfg("research.arxiv_results_per_query", 6))
+        per_query_scholar = int(self._cfg("research.scholar_results_per_query", 4))
 
         for query in self._focus_queries():
-            if self.config.get("research.enable_arxiv", True):
+            arxiv_count_before = len(arxiv_candidates)
+            scholar_count_before = len(scholar_candidates)
+            if self._cfg("research.enable_arxiv", True):
                 arxiv_candidates.extend(await self._fetch_arxiv(query, per_query_arxiv))
-            if self.config.get("research.enable_google_scholar", True):
-                await asyncio.sleep(float(self.config.get("network.scholar_request_interval_seconds", 1.0)))
+            if self._cfg("research.enable_google_scholar", True):
+                await asyncio.sleep(float(self._cfg("network.scholar_request_interval_seconds", 1.0)))
                 scholar_candidates.extend(await self._fetch_google_scholar(query, per_query_scholar))
+            logger.info(
+                "[%s] query=%s fetched arxiv=%s scholar=%s",
+                PLUGIN_NAME,
+                query,
+                len(arxiv_candidates) - arxiv_count_before,
+                len(scholar_candidates) - scholar_count_before,
+            )
 
         merged: dict[str, PaperCandidate] = {}
         for candidate in arxiv_candidates + scholar_candidates:
@@ -389,9 +619,11 @@ class ResearchDigestPlugin(Star):
             if not current.scholar_meta and candidate.scholar_meta:
                 current.scholar_meta = candidate.scholar_meta
             current.keywords = list(sorted(set(current.keywords + candidate.keywords)))
-            current.source = ",".join(sorted(set(filter(None, [current.source, candidate.source]))))
+            current.source = ",".join(
+                sorted({value for value in [current.source, candidate.source] if value})
+            )
 
-        recent_cutoff = datetime.now() - timedelta(days=int(self.config.get("research.recent_days", 7)))
+        recent_cutoff = datetime.now() - timedelta(days=int(self._cfg("research.recent_days", 7)))
         scored = []
         for candidate in merged.values():
             if candidate.updated:
@@ -405,6 +637,7 @@ class ResearchDigestPlugin(Star):
             scored.append((score, candidate))
 
         scored.sort(key=lambda item: item[0], reverse=True)
+        logger.info("[%s] merged candidates=%s", PLUGIN_NAME, len(scored))
         return [candidate for _, candidate in scored]
 
     async def _fetch_arxiv(self, query: str, limit: int) -> list[PaperCandidate]:
@@ -505,7 +738,7 @@ class ResearchDigestPlugin(Star):
     async def _fetch_github_repos(self, query: str, limit: int) -> list[RepoCandidate]:
         client = self._require_http()
         headers = {}
-        token = self.config.get("providers.github_token", "").strip()
+        token = str(self._cfg("providers.github_token", "")).strip()
         if token:
             headers["Authorization"] = f"Bearer {token}"
         params = {
@@ -548,7 +781,7 @@ class ResearchDigestPlugin(Star):
                     prompt=prompt,
                     session_id=f"{PLUGIN_NAME}_{self._slugify(candidate.title)}",
                     contexts=[],
-                    model=self.config.get("providers.summary_model", "").strip() or None,
+                    model=str(self._cfg("providers.summary_model", "")).strip() or None,
                 )
                 parsed = self._extract_json((response.completion_text or "").strip())
             except TypeError:
@@ -597,50 +830,64 @@ class ResearchDigestPlugin(Star):
     async def _sync_to_knowledge_base(
         self, summaries: list[PaperSummary], index_md: str, day_dir: Path
     ) -> str:
-        kb_meta = self.context.get_registered_star("astrbot_plugin_knowledge_base")
-        if not kb_meta or not kb_meta.star_cls:
-            return "知识库插件不可用，但 Markdown 摘要已经生成。"
+        try:
+            kb_meta = self.context.get_registered_star("astrbot_plugin_knowledge_base")
+            if not kb_meta or not kb_meta.star_cls:
+                return "知识库插件不可用，但 Markdown 摘要已经生成。"
 
-        kb_plugin = kb_meta.star_cls
-        ensure_fn = getattr(kb_plugin, "_ensure_initialized", None)
-        if ensure_fn and not await ensure_fn():
-            return "知识库插件尚未初始化，已跳过知识库写入。"
+            kb_plugin = kb_meta.star_cls
+            ensure_fn = getattr(kb_plugin, "_ensure_initialized", None)
+            if ensure_fn and not await ensure_fn():
+                return "知识库插件尚未初始化，已跳过知识库写入。"
 
-        document_cls = None
-        for module_name in (
-            "astrbot_plugin_knowledge_base.vector_store.base",
-            "data.plugins.astrbot_plugin_knowledge_base.vector_store.base",
-        ):
-            try:
-                module = importlib.import_module(module_name)
-                document_cls = getattr(module, "Document", None)
-                if document_cls:
-                    break
-            except Exception:
-                continue
-        if not document_cls:
-            return "知识库 Document 类型不可用，已跳过知识库写入。"
+            document_cls = None
+            for module_name in (
+                "astrbot_plugin_knowledge_base.vector_store.base",
+                "data.plugins.astrbot_plugin_knowledge_base.vector_store.base",
+            ):
+                try:
+                    module = importlib.import_module(module_name)
+                    document_cls = getattr(module, "Document", None)
+                    if document_cls:
+                        break
+                except Exception:
+                    continue
+            if not document_cls:
+                return "知识库 Document 类型不可用，已跳过知识库写入。"
 
-        collection_name = self.config.get("outputs.collection_name", DEFAULT_COLLECTION)
-        vector_db = getattr(kb_plugin, "vector_db", None)
-        text_splitter = getattr(kb_plugin, "text_splitter", None)
-        if not vector_db or not text_splitter:
-            return "知识库插件缺少 vector_db 或 text_splitter，已跳过知识库写入。"
+            collection_name = self._cfg("outputs.collection_name", DEFAULT_COLLECTION)
+            vector_db = getattr(kb_plugin, "vector_db", None)
+            text_splitter = getattr(kb_plugin, "text_splitter", None)
+            if not vector_db or not text_splitter:
+                return "知识库插件缺少 vector_db 或 text_splitter，已跳过知识库写入。"
 
-        if not await vector_db.collection_exists(collection_name):
-            await vector_db.create_collection(collection_name)
+            if not await vector_db.collection_exists(collection_name):
+                await vector_db.create_collection(collection_name)
 
-        all_documents = []
-        for summary in summaries:
-            markdown = self._render_paper_markdown(summary)
-            for idx, chunk in enumerate(text_splitter.split_text(markdown)):
+            all_documents = []
+            for summary in summaries:
+                markdown = self._render_paper_markdown(summary)
+                for idx, chunk in enumerate(text_splitter.split_text(markdown)):
+                    all_documents.append(
+                        document_cls(
+                            text_content=chunk,
+                            metadata={
+                                "source": f"{summary.title}.md",
+                                "paper_url": summary.paper_url,
+                                "pdf_url": summary.pdf_url,
+                                "day_dir": str(day_dir),
+                                "chunk_id": idx,
+                                "plugin": PLUGIN_NAME,
+                            },
+                        )
+                    )
+
+            for idx, chunk in enumerate(text_splitter.split_text(index_md)):
                 all_documents.append(
                     document_cls(
                         text_content=chunk,
                         metadata={
-                            "source": f"{summary.title}.md",
-                            "paper_url": summary.paper_url,
-                            "pdf_url": summary.pdf_url,
+                            "source": "_index.md",
                             "day_dir": str(day_dir),
                             "chunk_id": idx,
                             "plugin": PLUGIN_NAME,
@@ -648,21 +895,43 @@ class ResearchDigestPlugin(Star):
                     )
                 )
 
-        for idx, chunk in enumerate(text_splitter.split_text(index_md)):
-            all_documents.append(
-                document_cls(
-                    text_content=chunk,
-                    metadata={
-                        "source": "_index.md",
-                        "day_dir": str(day_dir),
-                        "chunk_id": idx,
-                        "plugin": PLUGIN_NAME,
-                    },
+            if not all_documents:
+                return "没有可写入知识库的文档分片。"
+            doc_ids = await vector_db.add_documents(collection_name, all_documents)
+            success_count = len(doc_ids)
+            if success_count <= 0:
+                logger.warning(
+                    "[%s] knowledge base sync produced zero successful chunks | collection=%s total=%s",
+                    PLUGIN_NAME,
+                    collection_name,
+                    len(all_documents),
                 )
+                return (
+                    f"知识库向量写入未成功（0/{len(all_documents)} 个分片），"
+                    "但 Markdown 摘要和知识库镜像文件已经生成。"
+                )
+            if success_count < len(all_documents):
+                logger.warning(
+                    "[%s] knowledge base sync partially succeeded | collection=%s success=%s total=%s",
+                    PLUGIN_NAME,
+                    collection_name,
+                    success_count,
+                    len(all_documents),
+                )
+                return (
+                    f"知识库集合 `{collection_name}` 部分写入成功，"
+                    f"成功 {success_count}/{len(all_documents)} 个分片。"
+                )
+            logger.info(
+                "[%s] knowledge base synced collection=%s chunks=%s",
+                PLUGIN_NAME,
+                collection_name,
+                success_count,
             )
-
-        await vector_db.add_documents(collection_name, all_documents)
-        return f"已写入知识库集合 `{collection_name}`，共 {len(all_documents)} 个分片。"
+            return f"已写入知识库集合 `{collection_name}`，共 {success_count} 个分片。"
+        except Exception as exc:
+            logger.warning("[%s] knowledge base sync failed: %s", PLUGIN_NAME, exc, exc_info=True)
+            return f"知识库写入失败：{exc}，但 Markdown 摘要已经生成。"
 
     def _build_prompt(
         self, candidate: PaperCandidate, repo_radar: list[RepoCandidate]
@@ -691,10 +960,10 @@ class ResearchDigestPlugin(Star):
         return prompt
 
     def _active_summary_prompt(self) -> str:
-        prompt_override = self.config.get("prompts.summary_prompt_override", "").strip()
-        prompt_prefix = self.config.get("prompts.summary_prompt_prefix", "").strip()
-        prompt_suffix = self.config.get("prompts.summary_prompt_suffix", "").strip()
-        daily_focus_note = self.config.get("prompts.daily_focus_note", "").strip()
+        prompt_override = str(self._cfg("prompts.summary_prompt_override", "")).strip()
+        prompt_prefix = str(self._cfg("prompts.summary_prompt_prefix", "")).strip()
+        prompt_suffix = str(self._cfg("prompts.summary_prompt_suffix", "")).strip()
+        daily_focus_note = str(self._cfg("prompts.daily_focus_note", "")).strip()
 
         parts = []
         if prompt_prefix:
@@ -836,7 +1105,7 @@ class ResearchDigestPlugin(Star):
                 f"- 触发原因：{self._format_reason(reason)}",
                 f"- 当前主题：{self._topic_label()}",
                 f"- 监控 QQ：{', '.join(self._get_watched_user_ids()) or '(未设置)'}",
-                f"- 空闲触发小时数：{self.config.get('runtime.inactivity_hours', 12)}",
+                f"- 空闲触发小时数：{self._cfg('runtime.inactivity_hours', 12)}",
                 f"- 启用来源：{', '.join(self._enabled_source_labels()) or '(未启用)'}",
                 f"- 实际生成论文数：{len(summaries)}",
                 f"- GitHub 雷达数：{len(repo_radar)}",
@@ -878,7 +1147,7 @@ class ResearchDigestPlugin(Star):
         }
 
     def _get_summary_provider(self):
-        provider_id = self.config.get("providers.summary_provider_id", "").strip()
+        provider_id = str(self._cfg("providers.summary_provider_id", "")).strip()
         provider = None
         if provider_id:
             provider = self.context.get_provider_by_id(provider_id)
@@ -887,14 +1156,14 @@ class ResearchDigestPlugin(Star):
         return provider
 
     def _get_watched_user_ids(self) -> list[str]:
-        configured = self.config.get("runtime.watched_user_ids", [])
+        configured = self._cfg("runtime.watched_user_ids", [])
         watched = [str(x).strip() for x in configured if str(x).strip()]
         if watched:
             return watched
         return list(self.admin_ids)
 
     def _focus_queries(self) -> list[str]:
-        configured = self.config.get("research.focus_queries", [])
+        configured = self._cfg("research.focus_queries", [])
         values = [str(x).strip() for x in configured if str(x).strip()]
         return values or [
             "artificial intelligence",
@@ -904,8 +1173,105 @@ class ResearchDigestPlugin(Star):
         ]
 
     def _topic_label(self) -> str:
-        label = str(self.config.get("research.topic_label", "")).strip()
+        label = str(self._cfg("research.topic_label", "")).strip()
         return label or "研究主题"
+
+    def _notification_platform_id(self) -> str:
+        configured = str(self._cfg("notifications.platform_id", "")).strip()
+        if configured:
+            return configured
+        for inst in self.context.platform_manager.platform_insts:
+            try:
+                meta = inst.meta()
+                if meta and meta.id:
+                    return meta.id
+            except Exception:
+                continue
+        return ""
+
+    def _notify_targets(self) -> list[str]:
+        configured = self._cfg("notifications.notify_session_ids", [])
+        values = [str(x).strip() for x in configured if str(x).strip()]
+        if not values:
+            values = self._get_watched_user_ids()
+        platform_id = self._notification_platform_id()
+        sessions: list[str] = []
+        for value in values:
+            if ":" in value:
+                sessions.append(value)
+            elif platform_id:
+                sessions.append(f"{platform_id}:FriendMessage:{value}")
+        return list(dict.fromkeys(sessions))
+
+    def _scheduled_datetime_today(self, raw_time: str) -> datetime | None:
+        try:
+            hour_str, minute_str = raw_time.split(":", 1)
+            now = datetime.now()
+            return now.replace(
+                hour=int(hour_str),
+                minute=int(minute_str),
+                second=0,
+                microsecond=0,
+            )
+        except Exception:
+            return None
+
+    def _build_notification_text(
+        self,
+        reason: str,
+        summaries: list[PaperSummary],
+        repo_radar: list[RepoCandidate],
+        generated_files: list[str],
+        kb_message: str,
+    ) -> str:
+        top_lines = []
+        for idx, summary in enumerate(summaries[:3], start=1):
+            top_lines.append(f"{idx}. {summary.title}")
+        desktop_index = next((path for path in generated_files if path.endswith("/_index.md")), "")
+        lines = [
+            f"主题：{self._topic_label()}",
+            f"触发原因：{self._format_reason(reason)}",
+            f"生成论文数：{len(summaries)}",
+            f"GitHub 雷达数：{len(repo_radar)}",
+            f"知识库结果：{kb_message}",
+        ]
+        if top_lines:
+            lines.append("今日论文：")
+            lines.extend(top_lines)
+        if desktop_index:
+            lines.append(f"索引文件：{desktop_index}")
+        return "\n".join(lines)
+
+    async def _notify_result(self, title: str, body: str, notify_key: str) -> None:
+        notify_enabled = self._cfg("notifications.enabled", True)
+        if not notify_enabled:
+            self.state["last_notification_status"] = "disabled"
+            return
+
+        if notify_key == "success" and not self._cfg("notifications.notify_on_success", True):
+            self.state["last_notification_status"] = "skipped_success"
+            return
+        if notify_key == "empty" and not self._cfg("notifications.notify_on_empty", False):
+            self.state["last_notification_status"] = "skipped_empty"
+            return
+        if notify_key == "failure" and not self._cfg("notifications.notify_on_failure", True):
+            self.state["last_notification_status"] = "skipped_failure"
+            return
+
+        session_ids = self._notify_targets()
+        if not session_ids:
+            self.state["last_notification_status"] = "no_target"
+            return
+
+        chain = MessageChain().message(f"{title}\n{body}")
+        sent = 0
+        for session_id in session_ids:
+            try:
+                await self.context.send_message(session_id, chain)
+                sent += 1
+            except Exception as exc:
+                logger.warning("[%s] notify %s failed: %s", PLUGIN_NAME, session_id, exc)
+        self.state["last_notification_status"] = f"sent:{sent}/{len(session_ids)}"
 
     def _enabled_source_labels(self) -> list[str]:
         return [
@@ -915,15 +1281,15 @@ class ResearchDigestPlugin(Star):
                 ("research.enable_google_scholar", "Google Scholar"),
                 ("research.enable_github", "GitHub"),
             ]
-            if self.config.get(key, True)
+            if self._cfg(key, True)
         ]
 
     def _resolve_output_dir(self) -> Path:
-        configured = self.config.get("outputs.desktop_output_dir", DEFAULT_DESKTOP_DIR)
+        configured = self._cfg("outputs.desktop_output_dir", DEFAULT_DESKTOP_DIR)
         return Path(str(configured)).expanduser()
 
     def _kb_import_dir(self) -> Path:
-        configured = self.config.get(
+        configured = self._cfg(
             "outputs.knowledge_base_import_subdir",
             f"imports/{DEFAULT_COLLECTION}",
         )
@@ -933,7 +1299,12 @@ class ResearchDigestPlugin(Star):
     def _format_reason(reason: str) -> str:
         mapping = {
             "manual": "手动触发",
-            "scheduled": "空闲自动触发",
+            "idle": "空闲自动触发",
+            "startup": "启动后自动首跑",
+            "daily_time": "固定时刻触发",
+            "retry_failure": "失败后补跑",
+            "retry_empty": "空结果补跑",
+            "scheduled": "自动触发",
         }
         return mapping.get(str(reason).strip(), str(reason).strip())
 
@@ -959,10 +1330,23 @@ class ResearchDigestPlugin(Star):
         self, status: str, reason: str, message: str, generated_files: list[str]
     ) -> None:
         self.state["last_run_date"] = self._today_str()
+        self.state["last_run_at"] = datetime.now().isoformat(timespec="seconds")
         self.state["last_run_reason"] = reason
         self.state["last_run_status"] = status
         self.state["last_error"] = "" if status == "success" else message
         self.state["last_generated_files"] = generated_files
+        history = self.state.get("run_history", [])
+        if not isinstance(history, list):
+            history = []
+        history.append(
+            {
+                "at": self.state["last_run_at"],
+                "reason": reason,
+                "status": status,
+                "message": message,
+            }
+        )
+        self.state["run_history"] = history[-20:]
         self._save_state()
 
     def _save_state(self) -> None:
@@ -983,6 +1367,24 @@ class ResearchDigestPlugin(Star):
 
     def _today_str(self) -> str:
         return datetime.now().strftime("%Y-%m-%d")
+
+    def _state_datetime(self, key: str) -> datetime | None:
+        raw = str(self.state.get(key, "") or "").strip()
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+
+    def _cfg(self, path: str, default: Any = None) -> Any:
+        current: Any = self.config
+        for part in str(path).split("."):
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            else:
+                return default
+        return current
 
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         return str(event.get_sender_id() or "").strip() in self.admin_ids

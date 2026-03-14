@@ -31,11 +31,41 @@
         "type": "int",
         "default": 30
       },
+      "enable_startup_run": {
+        "description": "启动后自动首跑",
+        "hint": "开启后，插件启动一段时间后会自动补跑一次当天任务，避免一直等到长时间空闲才首次执行。",
+        "type": "bool",
+        "default": true
+      },
+      "startup_run_delay_minutes": {
+        "description": "启动首跑延迟（分钟）",
+        "hint": "插件启动后，延迟这么久再尝试自动首跑。",
+        "type": "int",
+        "default": 3
+      },
+      "fixed_daily_time": {
+        "description": "固定执行时间",
+        "hint": "可选，格式 `HH:MM`，例如 `09:30`。设置后每天到这个时间也会尝试自动执行一次。",
+        "type": "string",
+        "default": ""
+      },
       "run_only_once_per_day": {
         "description": "每天只自动执行一次",
         "hint": "开启后，同一天内最多自动跑一次；手动执行不受这个限制。",
         "type": "bool",
         "default": true
+      },
+      "retry_on_failure_minutes": {
+        "description": "失败补跑间隔（分钟）",
+        "hint": "当天执行失败后，间隔这么久再自动补跑。填 0 表示关闭失败补跑。",
+        "type": "int",
+        "default": 90
+      },
+      "retry_on_empty_minutes": {
+        "description": "空结果补跑间隔（分钟）",
+        "hint": "当天没有检索到论文时，间隔这么久再自动补跑。填 0 表示关闭空结果补跑。",
+        "type": "int",
+        "default": 180
       }
     }
   },
@@ -180,6 +210,48 @@
         "hint": "适当放慢访问节奏，有助于减少 Google Scholar 拒绝请求的概率。",
         "type": "float",
         "default": 1.0
+      }
+    }
+  },
+  "notifications": {
+    "description": "主动通知",
+    "hint": "控制任务完成后是否主动向私聊发送结果摘要。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用主动通知",
+        "type": "bool",
+        "default": true
+      },
+      "platform_id": {
+        "description": "平台 ID",
+        "hint": "留空时自动使用当前已运行的第一个平台，例如 `Taoy`。",
+        "type": "string",
+        "default": ""
+      },
+      "notify_session_ids": {
+        "description": "通知目标",
+        "hint": "可填写 QQ 号列表，或完整 session id。留空时默认通知 `runtime.watched_user_ids`。",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "notify_on_success": {
+        "description": "成功时通知",
+        "type": "bool",
+        "default": true
+      },
+      "notify_on_empty": {
+        "description": "无结果时通知",
+        "type": "bool",
+        "default": false
+      },
+      "notify_on_failure": {
+        "description": "失败时通知",
+        "type": "bool",
+        "default": true
       }
     }
   },

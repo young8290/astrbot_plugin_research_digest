@@ -14,11 +14,12 @@
 ## 当前能力
 
 - 支持按主题关键词检索 `arXiv`、`Google Scholar`、`GitHub`
-- 支持“用户空闲后自动触发”与管理员手动触发
+- 支持“启动首跑 / 固定时刻 / 用户空闲 / 失败补跑 / 管理员手动触发”多种执行方式
 - 支持在 AstrBot 插件设置页中单独配置主题、Prompt、每日数量、来源开关
 - 每篇论文单独输出一个 `.md`
 - 每天生成一个 `_index.md` 和可选的 `manifest.json`
 - 可把摘要镜像到知识库目录，并写入 AstrBot knowledge base collection
+- 自带 `/digest doctor` 自检指令，便于排查为什么没触发或没写入
 
 ## 命令
 
@@ -28,6 +29,8 @@
   查看当前主题、来源开关、最近运行状态
 - `/digest prompt`
   查看当前实际生效的总结 Prompt
+- `/digest doctor`
+  查看调度、自启动、通知目标、输出目录、知识库联动等诊断信息
 
 兼容别名：
 
@@ -47,6 +50,14 @@
   每日生成多少篇完整论文摘要
 - `runtime.watched_user_ids`
   监控哪些 QQ 号的“主动消息”
+- `runtime.enable_startup_run`
+  是否在插件启动后自动补跑当天首轮任务
+- `runtime.fixed_daily_time`
+  每天固定执行时间，格式 `HH:MM`
+- `runtime.retry_on_failure_minutes`
+  当天执行失败后，间隔多久自动补跑
+- `runtime.retry_on_empty_minutes`
+  当天没有检索到论文时，间隔多久自动补跑
 - `outputs.sync_to_knowledge_base`
   是否同步写入 AstrBot 知识库
 - `prompts.summary_prompt_override`
@@ -92,3 +103,4 @@
 - `Google Scholar` 抓取属于 best-effort，可能因为反爬限制返回空结果或 `403`
 - 数学公式只会在已有证据足够时写入，不会强行补全
 - 如果未安装或未初始化 `astrbot_plugin_knowledge_base`，插件仍会生成 Markdown，但会跳过知识库写入
+- 如果知识库插件本身的 embedding 配置无效，Research Digest 会保留 Markdown 与知识库镜像文件，并在运行状态里明确提示向量写入失败

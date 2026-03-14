@@ -92,9 +92,3 @@
 - `Google Scholar` 抓取属于 best-effort，可能因为反爬限制返回空结果或 `403`
 - 数学公式只会在已有证据足够时写入，不会强行补全
 - 如果未安装或未初始化 `astrbot_plugin_knowledge_base`，插件仍会生成 Markdown，但会跳过知识库写入
-
-## 发布到 GitHub 前建议
-
-- 检查默认 `focus_queries` 和 `topic_label` 是否符合你要发布的主题
-- 不要把真实 `GitHub Token`、模型 key、私有 QQ 配置提交到仓库
-- 建议补一个 `LICENSE`
